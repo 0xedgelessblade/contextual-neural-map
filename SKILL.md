@@ -109,8 +109,8 @@ Save the completed HTML to the workspace root as `contextual-neural-map.html` (o
 The template includes these interactions out of the box — no extra development needed:
 
 - **Hover**: highlights connected nodes and edges, dims the rest, shows tooltip card
-- **Click**: locks focus mode on a node; click again to release
-- **Drag**: reposition any node
+- **Click**: locks focus mode on a node; click again, press ESC, or click blank area to release
+- **Drag**: reposition any node (tooltip suppressed during drag)
 - **Scroll wheel**: zoom the canvas
 - **Search**: top-right input box, live-filters matching nodes (also reveals connected tags)
 - **Legend filter**: click legend items to toggle type visibility
