@@ -1,0 +1,730 @@
+# Contextual Neural Map — 互動式知識圖譜產生器
+
+> 把這份指南完整貼給你的 AI 助手，告訴它要視覺化哪個資料夾，它會產出一份互動式 HTML。
+> 用瀏覽器打開即可探索。支援拖曳、縮放、搜尋、hover 查看詳情、圖層篩選。
+
+---
+
+## 工作流程
+
+1. **掃描資料夾**：遞迴讀取所有檔案
+2. **萃取資料**：從檔案中萃取 tags（主題）、nodes（節點）、edges（關聯），規則如下：
+   - Tags：從標題、frontmatter、資料夾名稱、高頻關鍵字中偵測主題群
+   - Nodes：每個檔案 = 一個節點。有實質內容 → `document`；短筆記 → `note`；含 draft 字樣 → `draft`
+   - Edges：節點→主題 = `tag-link`；交叉引用/共享關鍵字 = `content-link`；同序列 = `sequence-link`
+3. **注入資料**：把萃取結果填入下方 HTML 模板的 `// __DATA_INJECT__` ~ `// __DATA_END__` 區塊
+4. **存檔交付**：存為 `.html`，用瀏覽器開啟
+
+### 資料格式
+
+```javascript
+const tags = [
+  { id: 't_topicname', label: 'Topic Name' },
+];
+const documents = [
+  { id: 'd_filename', label: 'Title', date: 'YYYY-MM-DD', weight: 1200, type: 'report', tags: ['t_topicA'], desc: 'Summary' },
+];
+const notes = [
+  { id: 'n_001', label: 'Note', status: 'note', tags: ['t_topicA'], desc: 'Desc', related: ['d_filename'] },
+];
+const sequenceGroups = [
+  ['d_ch1', 'd_ch2', 'd_ch3'],
+];
+```
+
+---
+
+## HTML 模板
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Contextual Neural Map</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Caveat:wght@400;600;700&family=Inter:wght@300;400;500;600&display=swap');
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  background: #f5f2ed;
+  color: #3a3632;
+  font-family: 'Inter', sans-serif;
+  overflow: hidden;
+  height: 100vh;
+  width: 100vw;
+}
+
+/* Paper texture overlay */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background:
+    repeating-linear-gradient(0deg, transparent, transparent 28px, rgba(180,170,155,0.07) 28px, rgba(180,170,155,0.07) 29px),
+    repeating-linear-gradient(90deg, transparent, transparent 28px, rgba(180,170,155,0.05) 28px, rgba(180,170,155,0.05) 29px);
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Subtle noise grain */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  opacity: 0.03;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  pointer-events: none;
+  z-index: 0;
+}
+
+#graph { width: 100%; height: 100%; position: relative; z-index: 1; }
+
+/* ─── Header ─── */
+.header {
+  position: fixed;
+  top: 28px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10;
+  text-align: center;
+  pointer-events: none;
+}
+.header h1 {
+  font-family: 'Caveat', cursive;
+  font-size: 32px;
+  font-weight: 700;
+  color: #2c2825;
+  letter-spacing: 2px;
+  line-height: 1;
+}
+.header .subtitle {
+  font-family: 'Caveat', cursive;
+  font-size: 14px;
+  color: #9e9589;
+  margin-top: 4px;
+  letter-spacing: 1px;
+}
+
+/* ─── Legend Panel ─── */
+.legend {
+  position: fixed;
+  top: 28px;
+  left: 28px;
+  background: rgba(245, 242, 237, 0.88);
+  border: 1.5px solid #d5cfc6;
+  border-radius: 14px;
+  padding: 18px 22px;
+  z-index: 10;
+  backdrop-filter: blur(16px);
+  box-shadow: 0 2px 20px rgba(58,54,50,0.06);
+}
+.legend-label {
+  font-family: 'Caveat', cursive;
+  font-size: 16px;
+  font-weight: 600;
+  color: #6b645b;
+  margin-bottom: 14px;
+  padding-bottom: 8px;
+  border-bottom: 1px dashed #cdc6bb;
+  letter-spacing: 0.5px;
+}
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: #7a7369;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 8px;
+  transition: all 0.2s;
+  font-weight: 400;
+}
+.legend-item:hover { background: rgba(58,54,50,0.05); }
+.legend-item.dimmed { opacity: 0.25; }
+.legend-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  border: 1.5px solid;
+}
+.legend-count {
+  font-family: 'Caveat', cursive;
+  font-size: 14px;
+  color: #a09888;
+  margin-left: auto;
+}
+
+/* ─── Search ─── */
+.search-box {
+  position: fixed;
+  top: 28px;
+  right: 28px;
+  z-index: 10;
+}
+.search-box input {
+  background: rgba(245, 242, 237, 0.88);
+  border: 1.5px solid #d5cfc6;
+  border-radius: 10px;
+  padding: 10px 16px 10px 36px;
+  color: #3a3632;
+  font-size: 13px;
+  font-family: 'Inter', sans-serif;
+  width: 200px;
+  outline: none;
+  backdrop-filter: blur(16px);
+  transition: all 0.25s;
+  box-shadow: 0 2px 12px rgba(58,54,50,0.04);
+}
+.search-box input:focus {
+  border-color: #a09888;
+  width: 240px;
+  box-shadow: 0 2px 20px rgba(58,54,50,0.08);
+}
+.search-box input::placeholder { color: #b8b0a4; }
+.search-icon {
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: #b8b0a4;
+  font-size: 14px;
+  pointer-events: none;
+}
+
+/* ─── Stats Bar ─── */
+.stats {
+  position: fixed;
+  bottom: 28px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(245, 242, 237, 0.88);
+  border: 1.5px solid #d5cfc6;
+  border-radius: 12px;
+  padding: 14px 28px;
+  z-index: 10;
+  display: flex;
+  gap: 32px;
+  backdrop-filter: blur(16px);
+  box-shadow: 0 2px 20px rgba(58,54,50,0.06);
+}
+.stat {
+  text-align: center;
+}
+.stat-val {
+  font-family: 'Caveat', cursive;
+  color: #2c2825;
+  font-weight: 700;
+  font-size: 22px;
+  display: block;
+  line-height: 1.1;
+}
+.stat-label {
+  font-size: 10px;
+  color: #a09888;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  font-weight: 500;
+}
+
+/* ─── Tooltip ─── */
+.tooltip {
+  position: fixed;
+  background: rgba(250, 248, 244, 0.96);
+  border: 1.5px solid #d5cfc6;
+  border-radius: 12px;
+  padding: 16px 20px;
+  font-size: 13px;
+  max-width: 340px;
+  pointer-events: none;
+  z-index: 20;
+  opacity: 0;
+  transition: opacity 0.15s;
+  backdrop-filter: blur(16px);
+  box-shadow: 0 6px 32px rgba(58,54,50,0.1);
+}
+.tooltip.visible { opacity: 1; }
+.tooltip h3 {
+  font-family: 'Caveat', cursive;
+  font-size: 18px;
+  font-weight: 700;
+  color: #2c2825;
+  margin-bottom: 8px;
+  line-height: 1.2;
+}
+.tooltip .meta {
+  font-size: 11px;
+  color: #8a8279;
+  margin-bottom: 5px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+}
+.tooltip .badge {
+  display: inline-block;
+  background: rgba(58,54,50,0.07);
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 10px;
+  color: #6b645b;
+}
+.tooltip .desc {
+  font-size: 12px;
+  color: #5a5349;
+  line-height: 1.6;
+  margin-top: 6px;
+  font-style: italic;
+}
+.tooltip .data-row {
+  display: flex;
+  gap: 16px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed #d5cfc6;
+}
+.tooltip .data-item {
+  text-align: center;
+}
+.tooltip .data-num {
+  font-family: 'Caveat', cursive;
+  font-size: 18px;
+  font-weight: 700;
+  color: #3a3632;
+  display: block;
+  line-height: 1;
+}
+.tooltip .data-label {
+  font-size: 9px;
+  color: #a09888;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+/* ─── Hint ─── */
+.hint {
+  position: fixed;
+  bottom: 28px;
+  right: 28px;
+  font-size: 10px;
+  color: #bfb8ad;
+  z-index: 10;
+  text-align: right;
+  line-height: 1.6;
+  font-style: italic;
+}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>__TITLE__</h1>
+  <div class="subtitle">__SUBTITLE__</div>
+</div>
+
+<div class="legend">
+  <div class="legend-label">Layers</div>
+  <div class="legend-item" data-type="document" onclick="toggleType('document')">
+    <div class="legend-dot" style="background:#4a4540; border-color:#3a3632;"></div>
+    <span>Documents</span>
+    <span class="legend-count" id="lc-document">0</span>
+  </div>
+  <div class="legend-item" data-type="note" onclick="toggleType('note')">
+    <div class="legend-dot" style="background:transparent; border-color:#7a7369; border-style:dashed;"></div>
+    <span>Notes</span>
+    <span class="legend-count" id="lc-note">0</span>
+  </div>
+  <div class="legend-item" data-type="draft" onclick="toggleType('draft')">
+    <div class="legend-dot" style="background:rgba(90,83,73,0.3); border-color:#7a7369;"></div>
+    <span>Drafts</span>
+    <span class="legend-count" id="lc-draft">0</span>
+  </div>
+  <div class="legend-item" data-type="tag" onclick="toggleType('tag')">
+    <div class="legend-dot" style="background:transparent; border-color:#a09888; border-width:2px;"></div>
+    <span>Topics</span>
+    <span class="legend-count" id="lc-tag">0</span>
+  </div>
+</div>
+
+<div class="search-box">
+  <span class="search-icon">&#9906;</span>
+  <input type="text" placeholder="Search nodes..." id="search" oninput="searchNodes(this.value)">
+</div>
+
+<div class="stats">
+  <div class="stat"><span class="stat-val" id="stat-nodes">0</span><span class="stat-label">Nodes</span></div>
+  <div class="stat"><span class="stat-val" id="stat-edges">0</span><span class="stat-label">Edges</span></div>
+  <div class="stat"><span class="stat-val" id="stat-clusters">0</span><span class="stat-label">Topics</span></div>
+  <div class="stat"><span class="stat-val" id="stat-files">0</span><span class="stat-label">Files</span></div>
+</div>
+
+<div class="hint">
+  drag to move &middot; scroll to zoom<br>
+  hover to explore &middot; click to focus<br>
+  ESC or click blank to unfocus
+</div>
+
+<div class="tooltip" id="tooltip"></div>
+
+<svg id="graph"></svg>
+
+<script>
+// ============ DATA ============
+// __DATA_INJECT__ — Replace this marker and everything until __DATA_END__ with actual data
+
+const tags = [
+  // { id: 't_example', label: 'Example Topic' },
+];
+
+const documents = [
+  // { id: 'd_xxx', label: 'Document Title', date: 'YYYY-MM-DD', weight: 1200, type: 'report', tags: ['t_xxx'], desc: 'Brief description' },
+];
+
+const notes = [
+  // { id: 'n_001', label: 'Note Title', status: 'note', tags: ['t_xxx'], desc: 'Description', related: ['n_002'] },
+];
+
+const sequenceGroups = [
+  // ['d_ch1', 'd_ch2', 'd_ch3'],  // ordered series
+];
+
+// __DATA_END__
+
+// ============ BUILD GRAPH ============
+
+const nodes = [];
+const links = [];
+const hiddenTypes = new Set();
+
+tags.forEach(t => {
+  nodes.push({ id: t.id, label: t.label, type: 'tag', radius: 10 });
+});
+
+documents.forEach(d => {
+  const r = d.weight ? Math.max(4, Math.min(20, Math.sqrt(d.weight / 500))) : 5;
+  nodes.push({
+    id: d.id, label: d.label, type: 'document',
+    radius: r, date: d.date, weight: d.weight,
+    docType: d.type, desc: d.desc
+  });
+  if (d.tags) d.tags.forEach(tid => links.push({ source: d.id, target: tid, type: 'tag-link' }));
+  if (d.related) d.related.forEach(rid => links.push({ source: d.id, target: rid, type: 'content-link' }));
+});
+
+notes.forEach(n => {
+  const isDraft = n.status === 'draft';
+  nodes.push({
+    id: n.id, label: n.label, type: isDraft ? 'draft' : 'note',
+    radius: 5.5, desc: n.desc, status: n.status
+  });
+  if (n.tags) n.tags.forEach(tid => links.push({ source: n.id, target: tid, type: 'tag-link' }));
+  if (n.related) n.related.forEach(rid => links.push({ source: n.id, target: rid, type: 'content-link' }));
+});
+
+sequenceGroups.forEach(s => {
+  for (let i = 0; i < s.length - 1; i++)
+    links.push({ source: s[i], target: s[i + 1], type: 'sequence-link' });
+});
+
+// ============ RENDER ============
+
+const width = window.innerWidth;
+const height = window.innerHeight;
+
+const svg = d3.select('#graph').attr('width', width).attr('height', height);
+const defs = svg.append('defs');
+
+// Pencil sketch filter
+const pencil = defs.append('filter').attr('id', 'pencil').attr('x', '-20%').attr('y', '-20%').attr('width', '140%').attr('height', '140%');
+pencil.append('feTurbulence').attr('type', 'turbulence').attr('baseFrequency', '0.03').attr('numOctaves', '4').attr('result', 'noise');
+pencil.append('feDisplacementMap').attr('in', 'SourceGraphic').attr('in2', 'noise').attr('scale', '2.5').attr('xChannelSelector', 'R').attr('yChannelSelector', 'G');
+
+// Sketch line filter (more wobbly)
+const sketchLine = defs.append('filter').attr('id', 'sketchLine').attr('x', '-10%').attr('y', '-10%').attr('width', '120%').attr('height', '120%');
+sketchLine.append('feTurbulence').attr('type', 'turbulence').attr('baseFrequency', '0.04').attr('numOctaves', '3').attr('result', 'noise');
+sketchLine.append('feDisplacementMap').attr('in', 'SourceGraphic').attr('in2', 'noise').attr('scale', '3').attr('xChannelSelector', 'R').attr('yChannelSelector', 'G');
+
+// Soft shadow
+const shadow = defs.append('filter').attr('id', 'softShadow');
+shadow.append('feGaussianBlur').attr('in', 'SourceAlpha').attr('stdDeviation', '4');
+shadow.append('feOffset').attr('dx', '0').attr('dy', '2');
+shadow.append('feComponentTransfer').append('feFuncA').attr('type', 'linear').attr('slope', '0.08');
+const shadowMerge = shadow.append('feMerge');
+shadowMerge.append('feMergeNode');
+shadowMerge.append('feMergeNode').attr('in', 'SourceGraphic');
+
+const g = svg.append('g');
+const zoom = d3.zoom().scaleExtent([0.15, 5]).on('zoom', e => g.attr('transform', e.transform));
+svg.call(zoom);
+
+const simulation = d3.forceSimulation(nodes)
+  .force('link', d3.forceLink(links).id(d => d.id).distance(d => {
+    if (d.type === 'content-link' || d.type === 'sequence-link') return 55;
+    return 95;
+  }).strength(d => d.type === 'content-link' || d.type === 'sequence-link' ? 0.8 : 0.25))
+  .force('charge', d3.forceManyBody().strength(d => d.type === 'tag' ? -350 : -100))
+  .force('center', d3.forceCenter(width / 2, height / 2))
+  .force('collision', d3.forceCollide().radius(d => d.radius + 6))
+  .force('x', d3.forceX(width / 2).strength(0.025))
+  .force('y', d3.forceY(height / 2).strength(0.025));
+
+const linkG = g.append('g');
+const nodeG = g.append('g');
+const labelG = g.append('g');
+
+// Draw links
+let linkEls = linkG.selectAll('line').data(links).enter().append('line')
+  .attr('stroke', d => {
+    if (d.type === 'sequence-link') return '#8a8279';
+    if (d.type === 'content-link') return '#a09888';
+    return '#cdc6bb';
+  })
+  .attr('stroke-width', d => {
+    if (d.type === 'sequence-link') return 1.8;
+    if (d.type === 'content-link') return 1.2;
+    return 0.5;
+  })
+  .attr('stroke-opacity', d => d.type === 'tag-link' ? 0.3 : 0.55)
+  .attr('stroke-dasharray', d => {
+    if (d.type === 'content-link') return '5,4';
+    if (d.type === 'sequence-link') return '8,3';
+    return 'none';
+  })
+  .attr('filter', 'url(#sketchLine)');
+
+// Draw nodes
+let nodeEls = nodeG.selectAll('circle').data(nodes).enter().append('circle')
+  .attr('r', d => d.radius)
+  .attr('fill', d => {
+    if (d.type === 'tag') return 'rgba(160,152,136,0.08)';
+    if (d.type === 'document') return '#4a4540';
+    if (d.type === 'draft') return 'rgba(90,83,73,0.4)';
+    return 'transparent'; // note = hollow
+  })
+  .attr('stroke', d => {
+    if (d.type === 'tag') return '#8a8279';
+    if (d.type === 'document') return '#3a3632';
+    if (d.type === 'draft') return '#6b645b';
+    return '#8a8279'; // note = dashed border
+  })
+  .attr('stroke-width', d => {
+    if (d.type === 'tag') return 2;
+    if (d.type === 'document') return 1.5;
+    return 1.2;
+  })
+  .attr('stroke-dasharray', d => d.type === 'note' ? '3,2' : 'none')
+  .attr('filter', d => d.type === 'document' ? 'url(#softShadow)' : 'url(#pencil)')
+  .attr('cursor', 'pointer')
+  .call(d3.drag().on('start', dragStart).on('drag', dragging).on('end', dragEnd))
+  .on('mouseover', showTooltip)
+  .on('mousemove', moveTooltip)
+  .on('mouseout', hideTooltip)
+  .on('click', focusNode);
+
+// Draw labels
+let labelEls = labelG.selectAll('text').data(nodes).enter().append('text')
+  .text(d => d.label)
+  .attr('font-family', d => d.type === 'tag' ? "'Caveat', cursive" : "'Inter', sans-serif")
+  .attr('font-size', d => d.type === 'tag' ? 14 : 9)
+  .attr('fill', d => d.type === 'tag' ? '#5a5349' : '#9e9589')
+  .attr('font-weight', d => d.type === 'tag' ? 700 : 400)
+  .attr('text-anchor', 'middle')
+  .attr('dy', d => d.radius + 14)
+  .attr('pointer-events', 'none')
+  .attr('opacity', d => d.type === 'tag' ? 0.85 : 0.55);
+
+simulation.on('tick', () => {
+  linkEls
+    .attr('x1', d => d.source.x).attr('y1', d => d.source.y)
+    .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
+  nodeEls.attr('cx', d => d.x).attr('cy', d => d.y);
+  labelEls.attr('x', d => d.x).attr('y', d => d.y);
+});
+
+// ============ INTERACTIONS ============
+
+const tooltip = document.getElementById('tooltip');
+let isDragging = false;
+
+function showTooltip(e, d) {
+  if (isDragging) return;
+  let html = `<h3>${d.label}</h3>`;
+  if (d.type === 'document') {
+    html += `<div class="meta">`;
+    if (d.date) html += `<span>${d.date}</span>`;
+    if (d.docType) html += `<span class="badge">${d.docType}</span>`;
+    html += `</div>`;
+    if (d.desc) html += `<div class="desc">"${d.desc}"</div>`;
+    if (d.weight) {
+      html += `<div class="data-row">`;
+      html += `<div class="data-item"><span class="data-num">${d.weight >= 1000 ? (d.weight/1000).toFixed(d.weight>=10000?0:1)+'K' : d.weight}</span><span class="data-label">weight</span></div>`;
+      html += `</div>`;
+    }
+  } else if (d.type === 'note' || d.type === 'draft') {
+    html += `<div class="meta"><span class="badge">${d.type === 'draft' ? 'Draft' : 'Note'}</span></div>`;
+    if (d.desc) html += `<div class="desc">"${d.desc}"</div>`;
+  } else if (d.type === 'tag') {
+    const count = links.filter(l => (l.source.id||l.source) === d.id || (l.target.id||l.target) === d.id).length;
+    html += `<div class="meta"><span>${count} connected nodes</span></div>`;
+  }
+  tooltip.innerHTML = html;
+  tooltip.classList.add('visible');
+
+  const connected = new Set([d.id]);
+  links.forEach(l => {
+    const sid = l.source.id || l.source;
+    const tid = l.target.id || l.target;
+    if (sid === d.id) connected.add(tid);
+    if (tid === d.id) connected.add(sid);
+  });
+
+  nodeEls.transition().duration(200)
+    .attr('opacity', n => connected.has(n.id) ? 1 : 0.06);
+  labelEls.transition().duration(200)
+    .attr('opacity', n => connected.has(n.id) ? 1 : 0.04);
+  linkEls.transition().duration(200)
+    .attr('stroke-opacity', l => {
+      const sid = l.source.id || l.source;
+      const tid = l.target.id || l.target;
+      return (sid === d.id || tid === d.id) ? 0.75 : 0.02;
+    })
+    .attr('stroke-width', l => {
+      const sid = l.source.id || l.source;
+      const tid = l.target.id || l.target;
+      if (sid === d.id || tid === d.id) {
+        return l.type === 'tag-link' ? 1.2 : 2.5;
+      }
+      return l.type === 'tag-link' ? 0.5 : 1;
+    });
+}
+
+function moveTooltip(e) {
+  tooltip.style.left = Math.min(e.clientX + 18, window.innerWidth - 360) + 'px';
+  tooltip.style.top = Math.min(e.clientY + 18, window.innerHeight - 220) + 'px';
+}
+
+function resetOpacity() {
+  nodeEls.transition().duration(300).attr('opacity', d => {
+    if (hiddenTypes.has(d.type)) return 0.04;
+    if (d.type === 'tag') return 0.7;
+    if (d.type === 'note') return 0.65;
+    return 0.9;
+  });
+  labelEls.transition().duration(300).attr('opacity', d => {
+    if (hiddenTypes.has(d.type)) return 0.02;
+    return d.type === 'tag' ? 0.85 : 0.55;
+  });
+  linkEls.transition().duration(300)
+    .attr('stroke-opacity', d => d.type === 'tag-link' ? 0.3 : 0.55)
+    .attr('stroke-width', d => {
+      if (d.type === 'sequence-link') return 1.8;
+      if (d.type === 'content-link') return 1.2;
+      return 0.5;
+    });
+}
+
+function hideTooltip() {
+  tooltip.classList.remove('visible');
+  if (!focusedNode) resetOpacity();
+}
+
+let focusedNode = null;
+function focusNode(e, d) {
+  e.stopPropagation();
+  if (focusedNode === d.id) {
+    unfocus();
+    return;
+  }
+  focusedNode = d.id;
+  showTooltip(e, d);
+}
+
+function unfocus() {
+  focusedNode = null;
+  tooltip.classList.remove('visible');
+  resetOpacity();
+}
+
+// Click blank area to exit focus
+svg.on('click', () => { if (focusedNode) unfocus(); });
+
+// ESC to exit focus
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && focusedNode) unfocus();
+});
+
+function dragStart(e, d) {
+  isDragging = true;
+  tooltip.classList.remove('visible');
+  if (!e.active) simulation.alphaTarget(0.3).restart();
+  d.fx = d.x; d.fy = d.y;
+}
+function dragging(e, d) { d.fx = e.x; d.fy = e.y; }
+function dragEnd(e, d) {
+  if (!e.active) simulation.alphaTarget(0);
+  d.fx = null; d.fy = null;
+  setTimeout(() => { isDragging = false; }, 150);
+}
+
+function toggleType(type) {
+  const item = document.querySelector(`.legend-item[data-type="${type}"]`);
+  if (hiddenTypes.has(type)) {
+    hiddenTypes.delete(type);
+    item.classList.remove('dimmed');
+  } else {
+    hiddenTypes.add(type);
+    item.classList.add('dimmed');
+  }
+  resetOpacity();
+}
+
+function searchNodes(q) {
+  if (!q) { resetOpacity(); return; }
+  q = q.toLowerCase();
+  const matched = new Set();
+  nodes.forEach(n => { if (n.label.toLowerCase().includes(q)) matched.add(n.id); });
+  // Also show connected tags
+  if (matched.size > 0) {
+    links.forEach(l => {
+      const sid = l.source.id || l.source;
+      const tid = l.target.id || l.target;
+      if (matched.has(sid) && nodes.find(n=>n.id===tid)?.type === 'tag') matched.add(tid);
+      if (matched.has(tid) && nodes.find(n=>n.id===sid)?.type === 'tag') matched.add(sid);
+    });
+  }
+  nodeEls.transition().duration(200).attr('opacity', d => matched.has(d.id) ? 1 : 0.04);
+  labelEls.transition().duration(200).attr('opacity', d => matched.has(d.id) ? 1 : 0.03);
+}
+
+// Legend counts
+document.getElementById('lc-document').textContent = documents.length;
+document.getElementById('lc-note').textContent = notes.filter(n => n.status !== 'draft').length;
+document.getElementById('lc-draft').textContent = notes.filter(n => n.status === 'draft').length;
+document.getElementById('lc-tag').textContent = tags.length;
+
+// Stats
+document.getElementById('stat-nodes').textContent = nodes.length;
+document.getElementById('stat-edges').textContent = links.length;
+document.getElementById('stat-clusters').textContent = tags.length;
+document.getElementById('stat-files').textContent = documents.length + notes.length;
+
+// Initial zoom
+setTimeout(() => {
+  svg.transition().duration(1000).call(zoom.transform, d3.zoomIdentity.translate(width*0.05, height*0.05).scale(0.9));
+}, 600);
+</script>
+</body>
+</html>
+```
+
+---
+
+## 環境需求
+- AI 需能讀寫檔案（掃描資料夾 + 產出 HTML）
+- D3.js v7 + Google Fonts（Caveat, Inter）皆透過 CDN 載入，無需本地安裝
+- 任何現代瀏覽器即可開啟產出的 HTML
